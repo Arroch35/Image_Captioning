@@ -12,4 +12,4 @@
 sleep 3
 
 # Change to your user home folder in the cluster.
-python3 -u evaluation.py
+python3 -u evaluation_with_temperatures.py
