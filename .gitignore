@@ -211,3 +211,7 @@ data/
 
 # Notebooks
 *.ipynb
+
+# .out .err
+*.err
+*.out
