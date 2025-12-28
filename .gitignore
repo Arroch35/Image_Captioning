@@ -209,6 +209,9 @@ __marimo__/
 # Data
 data/
 
+# Models
+models/
+
 # Notebooks
 *.ipynb
 
