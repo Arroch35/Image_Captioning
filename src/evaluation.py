@@ -3,7 +3,6 @@
 
 import os
 import torch
-import clip
 import numpy as np
 from PIL import Image
 import scipy.io as sio
@@ -15,12 +14,24 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 
+import clip  # OpenAI CLIP
+from flowers_names import FLOWER_CLASSES
+from utils import build_clip_preprocess, build_custom_resnet50_bert_clip
+from transformers import BertModel, BertTokenizer
+
+
 # ------------------------------------------------------
-# CONFIG
+# CONFIG — CHANGE MODEL HERE
 # ------------------------------------------------------
+MODEL_NAME = "resnet50_bert" #"resnet50_bert" #"ViT-B-32_zero_shot"          # used for filenames
+MODEL_TYPE = "custom_clip"                 # "openai_clip" | "openai_clip_finetuned" | "custom_clip"
+CLIP_BACKBONE = "ViT-B/32"                 # only for openai_clip and openai_clip_finetuned
+CHECKPOINT_PATH = "../models/custom_clip_resnet50_bert.pth"   # path/to/model.pth for custom
+
+PART = "/part3" # Change depending on the part of the project
 DATA_DIR = "../data"
 IMAGE_DIR = os.path.join(DATA_DIR, "jpg")
-RESULTS_DIR = "../data/results"
+RESULTS_DIR = "../data/results" + PART
 BATCH_SIZE = 32
 N_SPLITS = 10
 
@@ -28,47 +39,51 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Device: {device}")
+print(f"Model: {MODEL_NAME}")
 
 # ------------------------------------------------------
-# LOAD CLIP
+# LOAD MODEL
 # ------------------------------------------------------
-model, preprocess = clip.load("ViT-B/32", device=device)
-model.eval()
+def load_model():
+    if MODEL_TYPE == "openai_clip":
+        model, preprocess = clip.load(CLIP_BACKBONE, device=device)
+        model.eval()
+        return model, preprocess
+    
+    elif MODEL_TYPE == "openai_clip_finetuned":
+        # Fine-tuned OpenAI CLIP
+        model, preprocess = clip.load(CLIP_BACKBONE, device=device)
+
+        checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+
+        # Allow both raw state_dict or wrapped dict
+        if "state_dict" in checkpoint:
+            model.load_state_dict(checkpoint["state_dict"])
+        else:
+            model.load_state_dict(checkpoint)
+
+        model.to(device).eval()
+        return model, preprocess
+
+    elif MODEL_TYPE == "custom_clip":
+        from P3_Models import ModularCLIP  # your model file
+        checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+        model = build_custom_resnet50_bert_clip(device)
+        
+        model.load_state_dict(checkpoint)
+        model.to(device).eval()
+
+        preprocess = build_clip_preprocess(image_size=224)
+        return model, preprocess
+
+    else:
+        raise ValueError("Unknown MODEL_TYPE")
+
+model, preprocess = load_model()
 
 # ------------------------------------------------------
-# FLOWER CLASS NAMES (102)
+# FLOWER CLASS NAMES
 # ------------------------------------------------------
-FLOWER_CLASSES = [
-    "pink primrose", "hard-leaved pocket orchid", "canterbury bells",
-    "sweet pea", "english marigold", "tiger lily", "moon orchid",
-    "bird of paradise", "monkshood", "globe thistle",
-    "snapdragon", "colt's foot", "king protea", "spear thistle",
-    "yellow iris", "globe-flower", "purple coneflower", "peruvian lily",
-    "balloon flower", "giant white arum lily", "fire lily", "pincushion flower",
-    "fritillary", "red ginger", "grape hyacinth", "corn poppy",
-    "prince of wales feathers", "stemless gentian", "artichoke",
-    "sweet william", "carnation", "garden phlox", "love in the mist",
-    "mexican aster", "alpine sea holly", "ruby-lipped cattleya",
-    "cape flower", "great masterwort", "siam tulip", "lenten rose",
-    "barbeton daisy", "daffodil", "sword lily", "poinsettia",
-    "bolero deep blue", "wallflower", "marigold", "buttercup",
-    "oxeye daisy", "common dandelion", "petunia", "wild pansy",
-    "primula", "sunflower", "pelargonium", "bishop of llandaff",
-    "gaura", "geranium", "orange dahlia", "pink-yellow dahlia",
-    "cautleya spicata", "japanese anemone", "black-eyed susan",
-    "silverbush", "californian poppy", "osteospermum",
-    "spring crocus", "bearded iris", "windflower", "tree poppy",
-    "gazania", "azalea", "water lily", "rose", "thorn apple",
-    "morning glory", "passion flower", "lotus lotus",
-    "toad lily", "anthurium", "frangipani", "clematis",
-    "hibiscus", "columbine", "desert rose", "tree mallow",
-    "magnolia", "cyclamen", "watercress", "canna lily",
-    "hippeastrum", "bee balm", "ball moss", "foxglove",
-    "bougainvillea", "camellia", "mallow", "mexican petunia",
-    "bromelia", "blanket flower", "trumpet creeper",
-    "blackberry lily"
-]
-
 NUM_CLASSES = len(FLOWER_CLASSES)
 
 # ------------------------------------------------------
@@ -84,19 +99,58 @@ splits = {
 }
 
 # ------------------------------------------------------
-# PREPARE TEXT FEATURES (ONCE)
+# TEXT FEATURES (ONCE)
 # ------------------------------------------------------
 prompts = [f"a photo of a {name}" for name in FLOWER_CLASSES]
-text_tokens = clip.tokenize(prompts).to(device)
 
-with torch.no_grad():
-    text_features = model.encode_text(text_tokens)
-    text_features /= text_features.norm(dim=-1, keepdim=True)
+def get_tokenizer(model_name_or_type):
+    if model_name_or_type.lower().startswith("openai_clip"):
+        def tokenizer(prompts, device):
+            tokens = clip.tokenize(prompts).to(device)
+            return tokens, None
+        return tokenizer
+
+    elif model_name_or_type.lower().endswith("bert"):
+        bert_tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        def tokenizer(prompts, device):
+            encoded = bert_tokenizer(
+                prompts,
+                padding=True,
+                truncation=True,
+                return_tensors="pt"
+            )
+            return (
+                encoded["input_ids"].to(device),
+                encoded["attention_mask"].to(device)
+            )
+        return tokenizer
+
+    else:
+        raise ValueError(f"Unknown model type: {model_name_or_type}")
+
+# 1 Get tokenizer function
+tokenizer_fn = get_tokenizer(
+    MODEL_NAME if MODEL_TYPE == "custom_clip" else MODEL_TYPE
+)
+
+# 2 Run tokenizer
+text_tokens, attention_mask = tokenizer_fn(prompts, device)
+
+# 3 Encode text
+if MODEL_TYPE == "custom_clip" and MODEL_NAME.lower().endswith("bert"):
+    with torch.no_grad():
+        text_features = model.encode_text(text_tokens, attention_mask)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+else:
+    with torch.no_grad():
+        text_features = model.encode_text(text_tokens)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
 
 logit_scale = model.logit_scale.exp()
 
 # ------------------------------------------------------
-# EVALUATION FUNCTION
+# EVALUATION
 # ------------------------------------------------------
 def evaluate_ids(image_ids):
     top1 = top3 = top5 = 0
@@ -106,12 +160,11 @@ def evaluate_ids(image_ids):
 
     for i in tqdm(range(0, len(image_ids), BATCH_SIZE), leave=False):
         batch_ids = image_ids[i:i + BATCH_SIZE]
-        images = []
-        targets = []
+        images, targets = [], []
 
         for img_id in batch_ids:
             path = os.path.join(IMAGE_DIR, f"image_{img_id:05d}.jpg")
-            images.append(preprocess(Image.open(path)))
+            images.append(preprocess(Image.open(path).convert("RGB")))
             targets.append(labels[img_id - 1])
 
         images = torch.stack(images).to(device)
@@ -135,7 +188,6 @@ def evaluate_ids(image_ids):
         all_targets.append(targets.cpu())
 
     total = len(image_ids)
-
     return (
         top1 / total,
         top3 / total,
@@ -146,7 +198,7 @@ def evaluate_ids(image_ids):
     )
 
 # ------------------------------------------------------
-# K-FOLD CV PER SPLIT
+# K-FOLD EVALUATION
 # ------------------------------------------------------
 all_results = {}
 
@@ -154,67 +206,52 @@ for split_name, split_ids in splits.items():
     print(f"\n===== {split_name.upper()} SPLIT =====")
 
     kf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=42)
-
-    split_metrics = {
-        "top1": [],
-        "top3": [],
-        "top5": [],
-        "mean_similarity": [],
-    }
-
-    roc_logits = []
-    roc_targets = []
-    
     split_labels = labels[split_ids - 1]
+
+    metrics = {"top1": [], "top3": [], "top5": [], "mean_similarity": []}
+    roc_logits, roc_targets = [], []
 
     for fold, (_, test_idx) in enumerate(kf.split(split_ids, split_labels)):
         print(f"  Fold {fold + 1}/{N_SPLITS}")
         fold_ids = split_ids[test_idx]
 
         t1, t3, t5, ms, logits, targets = evaluate_ids(fold_ids)
-
-        split_metrics["top1"].append(t1)
-        split_metrics["top3"].append(t3)
-        split_metrics["top5"].append(t5)
-        split_metrics["mean_similarity"].append(ms)
+        metrics["top1"].append(t1)
+        metrics["top3"].append(t3)
+        metrics["top5"].append(t5)
+        metrics["mean_similarity"].append(ms)
 
         roc_logits.append(logits)
         roc_targets.append(targets)
 
     all_results[split_name] = {
-        "metrics": split_metrics,
+        "metrics": metrics,
         "roc_logits": roc_logits,
         "roc_targets": roc_targets,
     }
 
 # ------------------------------------------------------
-# BOXPLOTS PER SPLIT
+# BOXPLOTS
 # ------------------------------------------------------
 for split_name, result in all_results.items():
-    metrics = result["metrics"]
+    m = result["metrics"]
 
     plt.figure(figsize=(10, 6))
-    sns.boxplot(data=[
-        metrics["top1"],
-        metrics["top3"],
-        metrics["top5"],
-        metrics["mean_similarity"],
-    ])
-
-    plt.xticks([0, 1, 2, 3],
-               ["Top-1", "Top-3", "Top-5", "Mean Similarity"])
-    plt.ylabel("Score")
-    plt.title(f"CLIP Zero-Shot ({split_name} split, {N_SPLITS}-fold)")
+    sns.boxplot(data=[m["top1"], m["top3"], m["top5"], m["mean_similarity"]])
+    plt.xticks([0, 1, 2, 3], ["Top-1", "Top-3", "Top-5", "Mean Similarity"])
+    plt.title(f"{MODEL_NAME} – {split_name} split")
     plt.tight_layout()
-    plt.savefig(os.path.join(RESULTS_DIR, f"{split_name}_metrics_boxplot.png"))
+
+    plt.savefig(os.path.join(
+        RESULTS_DIR, f"{MODEL_NAME}_{split_name}_metrics_boxplot.png"
+    ))
     plt.close()
 
 # ------------------------------------------------------
-# ROC CURVES PER SPLIT
+# ROC CURVES
 # ------------------------------------------------------
 for split_name, result in all_results.items():
-    y_true = []
-    y_score = []
+    y_true, y_score = [], []
 
     for logits, targets in zip(result["roc_logits"], result["roc_targets"]):
         y_true.append(label_binarize(targets.numpy(), classes=np.arange(NUM_CLASSES)))
@@ -229,39 +266,32 @@ for split_name, result in all_results.items():
     plt.figure(figsize=(7, 6))
     plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
     plt.plot([0, 1], [0, 1], "--", color="gray")
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title(f"ROC Curve – {split_name} split")
+    plt.title(f"ROC – {MODEL_NAME} – {split_name}")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(RESULTS_DIR, f"{split_name}_roc_curve.png"))
+
+    plt.savefig(os.path.join(
+        RESULTS_DIR, f"{MODEL_NAME}_{split_name}_roc_curve.png"
+    ))
     plt.close()
 
 # ------------------------------------------------------
-# FINAL SUMMARY (MEAN ± STD)
+# SUMMARY CSV
 # ------------------------------------------------------
-
-summary_rows = []
-
-print("\n===== FINAL RESULTS (mean ± std over k folds) =====")
+rows = []
 
 for split_name, result in all_results.items():
-    print(f"\n{split_name.upper()} SPLIT:")
     for metric, values in result["metrics"].items():
-        mean = np.mean(values)
-        std = np.std(values)
-        print(f"  {metric.replace('_', ' ').title():18s}: {mean:.4f} ± {std:.4f}")
-        
-        summary_rows.append({
+        rows.append({
+            "model": MODEL_NAME,
             "split": split_name,
             "metric": metric,
-            "mean": mean,
-            "std": std,
+            "mean": np.mean(values),
+            "std": np.std(values),
         })
 
-summary_df = pd.DataFrame(summary_rows)
-
-csv_path = os.path.join(RESULTS_DIR, "summary_metrics.csv")
+summary_df = pd.DataFrame(rows)
+csv_path = os.path.join(RESULTS_DIR, f"{MODEL_NAME}_summary_metrics.csv")
 summary_df.round(4).to_csv(csv_path, index=False)
 
-print(f"\nResults saved to: {csv_path}")
+print(f"\nResults saved to {csv_path}")
