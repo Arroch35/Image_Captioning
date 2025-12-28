@@ -211,8 +211,8 @@ data/
 
 # Models
 models/
-*.pth
-*.pt
+models/*.pth
+models/*.pt
 
 # Notebooks
 *.ipynb
