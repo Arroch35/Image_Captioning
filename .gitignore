@@ -205,3 +205,18 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Data
+data/
+
+# Models
+models/
+models/*.pth
+models/*.pt
+
+# Notebooks
+*.ipynb
+
+# .out .err
+*.err
+*.out
