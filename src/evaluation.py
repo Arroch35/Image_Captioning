@@ -56,11 +56,7 @@ def load_model():
 
         checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
 
-        # Allow both raw state_dict or wrapped dict
-        if "state_dict" in checkpoint:
-            model.load_state_dict(checkpoint["state_dict"])
-        else:
-            model.load_state_dict(checkpoint)
+        model.load_state_dict(checkpoint)
 
         model.to(device).eval()
         return model, preprocess
