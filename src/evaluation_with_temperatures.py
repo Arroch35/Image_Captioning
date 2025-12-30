@@ -23,15 +23,13 @@ from P3_Models import *
 MODEL_TYPE = "custom_clip"
 # openai_clip | openai_clip_finetuned | custom_clip
 
-# OpenAI CLIP
 CLIP_BACKBONE = "ViT-B/32"
 
-# Custom CLIP
-IMAGE_ENCODER_NAME = "swin_tiny"  # resnet50 | swin_tiny
-TEXT_ENCODER_NAME = "bert-base-uncased" # bert-base-uncased | gpt2
-CHECKPOINT_PATH = "../models/custom_clip_swin_tiny_bert-base-uncased.pth" 
+IMAGE_ENCODER_NAME = "resnet50"  # resnet50 | swin_tiny
+TEXT_ENCODER_NAME = "gpt2" # bert-base-uncased | gpt2
+CHECKPOINT_PATH = "../models/custom_clip_resnet50_gpt2.pth"
 
-PART = "/part3"
+PART = "/part3" # Change for each part of the project
 DATA_DIR = "../data"
 IMAGE_DIR = os.path.join(DATA_DIR, "jpg")
 
@@ -54,7 +52,6 @@ RESULTS_DIR = os.path.join(BASE_RESULTS_DIR, MODEL_ID, "temperature")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 print(f"Device: {device}")
-print(f"Model type: {MODEL_TYPE}")
 print(f"Model ID: {MODEL_ID}")
 
 # ------------------------------------------------------
@@ -63,15 +60,12 @@ print(f"Model ID: {MODEL_ID}")
 def load_model():
     if MODEL_TYPE == "openai_clip":
         model, preprocess = clip.load(CLIP_BACKBONE, device=device)
-        model.eval()
-        return model, preprocess
+        return model.eval(), preprocess
 
     elif MODEL_TYPE == "openai_clip_finetuned":
         model, preprocess = clip.load(CLIP_BACKBONE, device=device)
-        ckpt = torch.load(CHECKPOINT_PATH, map_location=device)
-        model.load_state_dict(ckpt)
-        model.eval()
-        return model, preprocess
+        model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
+        return model.eval(), preprocess
 
     elif MODEL_TYPE == "custom_clip":
         image_encoder = build_image_encoder(IMAGE_ENCODER_NAME, EMBED_DIM)
@@ -83,15 +77,14 @@ def load_model():
             embed_dim=EMBED_DIM,
         )
 
-        checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
-        model.load_state_dict(checkpoint)
+        model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
         model.to(device).eval()
 
         preprocess = build_clip_preprocess(image_size=224)
         return model, preprocess
 
     else:
-        raise ValueError(f"Unknown MODEL_TYPE: {MODEL_TYPE}")
+        raise ValueError("Unknown MODEL_TYPE")
 
 model, preprocess = load_model()
 
@@ -165,19 +158,23 @@ with torch.no_grad():
 # ------------------------------------------------------
 # EVALUATION
 # ------------------------------------------------------
-def evaluate_ids(image_ids, temperature, collect_probs=False):
-    entropies, confidences, logit_stds = [], [], []
-    all_probs = []
+def evaluate_ids(image_ids, temperature):
+    entropies, confidences, logit_stds, gt_probs_all = [], [], [], []
 
     for i in tqdm(range(0, len(image_ids), BATCH_SIZE), leave=False):
         batch_ids = image_ids[i:i + BATCH_SIZE]
-        images = []
+        images, targets = [], []
 
         for img_id in batch_ids:
-            path = os.path.join(IMAGE_DIR, f"image_{img_id:05d}.jpg")
-            images.append(preprocess(Image.open(path).convert("RGB")))
+            images.append(
+                preprocess(Image.open(
+                    os.path.join(IMAGE_DIR, f"image_{img_id:05d}.jpg")
+                ).convert("RGB"))
+            )
+            targets.append(labels[img_id - 1])
 
         images = torch.stack(images).to(device)
+        targets = torch.tensor(targets, dtype=torch.long, device=device)
 
         with torch.no_grad():
             img_feat = model.encode_image(images)
@@ -186,40 +183,43 @@ def evaluate_ids(image_ids, temperature, collect_probs=False):
             logits = (img_feat @ text_features.T) / temperature
             probs = logits.softmax(dim=-1)
 
-            entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1)
-            confidence = probs.max(dim=-1).values
-            logit_std = logits.std(dim=-1)
+            entropies.extend(
+                (-(probs * torch.log(probs + 1e-8)).sum(dim=-1)).cpu().tolist()
+            )
+            confidences.extend(probs.max(dim=-1).values.cpu().tolist())
+            logit_stds.extend(logits.std(dim=-1).cpu().tolist())
 
-            entropies.extend(entropy.cpu().tolist())
-            confidences.extend(confidence.cpu().tolist())
-            logit_stds.extend(logit_std.cpu().tolist())
+            gt_probs_all.append(
+                probs.gather(1, targets.unsqueeze(1)).squeeze(1).cpu()
+            )
 
-            if collect_probs:
-                all_probs.append(probs.flatten().cpu())
-
-    if collect_probs:
-        return (
-            np.mean(entropies),
-            np.mean(confidences),
-            np.mean(logit_stds),
-            torch.cat(all_probs),
-        )
-
-    return np.mean(entropies), np.mean(confidences), np.mean(logit_stds)
+    return (
+        np.mean(entropies),
+        np.mean(confidences),
+        np.mean(logit_stds),
+        torch.cat(gt_probs_all),
+    )
 
 # ------------------------------------------------------
 # MAIN LOOP
 # ------------------------------------------------------
 summary_rows = []
-entropy_vs_T = []
+mean_conf_vs_T = []
+mean_entropy_vs_T = []
 
 for T in TEMPERATURES:
     print(f"\n===== TEMPERATURE {T} =====")
-    temp_probs = []
+
+    all_gt_probs = []
+    entropies_T = []
+    confidences_T = []
 
     for split_name, split_ids in splits.items():
-        ent, conf, lstd, probs = evaluate_ids(split_ids, T, collect_probs=True)
-        temp_probs.append(probs)
+        ent, conf, lstd, gt_probs = evaluate_ids(split_ids, T)
+
+        entropies_T.append(ent)
+        confidences_T.append(conf)
+        all_gt_probs.append(gt_probs)
 
         summary_rows.extend([
             {"model": MODEL_ID, "temperature": T, "split": split_name,
@@ -230,23 +230,27 @@ for T in TEMPERATURES:
              "metric": "logit_std", "mean": lstd},
         ])
 
-    entropy_vs_T.append(ent)
+    mean_entropy_vs_T.append(np.mean(entropies_T))
+    mean_conf_vs_T.append(np.mean(confidences_T))
 
-    all_probs = torch.cat(temp_probs).numpy()
+    # Ground-truth probability histogram
+    probs = torch.cat(all_gt_probs).numpy()
     plt.figure(figsize=(7, 5))
-    plt.hist(all_probs, bins=50, density=True)
-    plt.xlabel("Predicted probability")
+    plt.hist(probs, bins=50, density=True)
+    plt.xlabel("P(correct class)")
     plt.ylabel("Density")
-    plt.title(f"{MODEL_ID} | Probability Distribution (T={T})")
+    plt.title(f"{MODEL_ID} | Ground-truth Probability (T={T})")
     plt.tight_layout()
-    plt.savefig(os.path.join(RESULTS_DIR, f"probability_histogram_T{T}.png"))
+    plt.savefig(os.path.join(
+        RESULTS_DIR, f"gt_probability_histogram_T{T}.png"
+    ))
     plt.close()
 
 # ------------------------------------------------------
-# ENTROPY VS TEMPERATURE
+# ENTROPY VS TEMPERATURE (RESTORED)
 # ------------------------------------------------------
 plt.figure(figsize=(7, 5))
-plt.plot(TEMPERATURES, entropy_vs_T, marker="o")
+plt.plot(TEMPERATURES, mean_entropy_vs_T, marker="o")
 plt.xlabel("Temperature τ")
 plt.ylabel("Mean entropy")
 plt.title(f"Entropy vs Temperature ({MODEL_ID})")
@@ -256,10 +260,22 @@ plt.savefig(os.path.join(RESULTS_DIR, "entropy_vs_temperature.png"))
 plt.close()
 
 # ------------------------------------------------------
+# MEAN CONFIDENCE VS TEMPERATURE
+# ------------------------------------------------------
+plt.figure(figsize=(7, 5))
+plt.plot(TEMPERATURES, mean_conf_vs_T, marker="o")
+plt.xlabel("Temperature τ")
+plt.ylabel("Mean max probability")
+plt.title(f"Mean Confidence vs Temperature ({MODEL_ID})")
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(os.path.join(RESULTS_DIR, "mean_confidence_vs_temperature.png"))
+plt.close()
+
+# ------------------------------------------------------
 # SAVE CSV
 # ------------------------------------------------------
 df = pd.DataFrame(summary_rows)
-csv_path = os.path.join(RESULTS_DIR, "summary_metrics.csv")
-df.round(4).to_csv(csv_path, index=False)
+df.to_csv(os.path.join(RESULTS_DIR, "summary_metrics.csv"), index=False)
 
 print(f"\nAll temperature results saved to {RESULTS_DIR}")
