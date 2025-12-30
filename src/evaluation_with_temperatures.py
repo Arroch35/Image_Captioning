@@ -8,36 +8,54 @@ from PIL import Image
 import scipy.io as sio
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-import seaborn as sns
 import pandas as pd
 
 import clip
-from transformers import BertTokenizer
+from transformers import BertTokenizer, GPT2Tokenizer
+
 from flowers_names import FLOWER_CLASSES
-from utils import build_clip_preprocess, build_custom_resnet50_bert_clip
+from utils import *
+from P3_Models import *
 
 # ------------------------------------------------------
-# CONFIG
+# CONFIG — CHANGE MODEL HERE
 # ------------------------------------------------------
-MODEL_NAME = "ViT-B-32_zero_shot" # "resnet50_bert" #"ViT-B-32_zero_shot"          # used for filenames
-MODEL_TYPE = "openai_clip"   # openai_clip | openai_clip_finetuned | custom_clip
-CLIP_BACKBONE = "ViT-B/32"   # only for openai_clip and openai_clip_finetuned
-CHECKPOINT_PATH = "../models/custom_clip_resnet50_bert.pth"   # path/to/model.pth for custom
+MODEL_TYPE = "custom_clip"
+# openai_clip | openai_clip_finetuned | custom_clip
 
-PART = "/part1" # Change depending on the part of the project
+# OpenAI CLIP
+CLIP_BACKBONE = "ViT-B/32"
+
+# Custom CLIP
+IMAGE_ENCODER_NAME = "swin_tiny"  # resnet50 | swin_tiny
+TEXT_ENCODER_NAME = "bert-base-uncased" # bert-base-uncased | gpt2
+CHECKPOINT_PATH = "../models/custom_clip_swin_tiny_bert-base-uncased.pth" 
+
+PART = "/part3"
 DATA_DIR = "../data"
 IMAGE_DIR = os.path.join(DATA_DIR, "jpg")
-RESULTS_DIR = "../data/results" + PART
-TEMP_RESULTS_DIR = os.path.join(RESULTS_DIR, "temperature", MODEL_NAME)
 
 BATCH_SIZE = 32
 TEMPERATURES = [0.005, 0.01, 0.02, 0.05, 0.1]
-
-os.makedirs(TEMP_RESULTS_DIR, exist_ok=True)
+EMBED_DIM = 512
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# ------------------------------------------------------
+# MODEL ID & RESULTS DIR
+# ------------------------------------------------------
+if MODEL_TYPE == "custom_clip":
+    MODEL_ID = f"{IMAGE_ENCODER_NAME}_{TEXT_ENCODER_NAME}"
+else:
+    MODEL_ID = CLIP_BACKBONE.replace("/", "_")
+
+BASE_RESULTS_DIR = "../data/results" + PART
+RESULTS_DIR = os.path.join(BASE_RESULTS_DIR, MODEL_ID, "temperature")
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
 print(f"Device: {device}")
-print(f"Model: {MODEL_NAME}")
+print(f"Model type: {MODEL_TYPE}")
+print(f"Model ID: {MODEL_ID}")
 
 # ------------------------------------------------------
 # LOAD MODEL
@@ -56,14 +74,24 @@ def load_model():
         return model, preprocess
 
     elif MODEL_TYPE == "custom_clip":
-        model = build_custom_resnet50_bert_clip(device)
-        model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
-        model.eval()
+        image_encoder = build_image_encoder(IMAGE_ENCODER_NAME, EMBED_DIM)
+        text_encoder = build_text_encoder(TEXT_ENCODER_NAME, EMBED_DIM)
+
+        model = ModularCLIP(
+            image_encoder=image_encoder,
+            text_encoder=text_encoder,
+            embed_dim=EMBED_DIM,
+        )
+
+        checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+        model.load_state_dict(checkpoint)
+        model.to(device).eval()
+
         preprocess = build_clip_preprocess(image_size=224)
         return model, preprocess
 
     else:
-        raise ValueError("Unknown MODEL_TYPE")
+        raise ValueError(f"Unknown MODEL_TYPE: {MODEL_TYPE}")
 
 model, preprocess = load_model()
 
@@ -82,24 +110,56 @@ splits = {
 NUM_CLASSES = len(FLOWER_CLASSES)
 
 # ------------------------------------------------------
+# TOKENIZER — IDENTICAL TO EVALUATION
+# ------------------------------------------------------
+def get_tokenizer():
+    if MODEL_TYPE.startswith("openai_clip"):
+        def tokenizer_fn(prompts, device):
+            return clip.tokenize(prompts).to(device), None
+        return tokenizer_fn
+
+    elif "bert" in TEXT_ENCODER_NAME:
+        tokenizer = BertTokenizer.from_pretrained(TEXT_ENCODER_NAME)
+        def tokenizer_fn(prompts, device):
+            enc = tokenizer(
+                prompts,
+                padding=True,
+                truncation=True,
+                return_tensors="pt"
+            )
+            return enc["input_ids"].to(device), enc["attention_mask"].to(device)
+        return tokenizer_fn
+
+    elif "gpt" in TEXT_ENCODER_NAME:
+        tokenizer = GPT2Tokenizer.from_pretrained(TEXT_ENCODER_NAME)
+        tokenizer.pad_token = tokenizer.eos_token
+        def tokenizer_fn(prompts, device):
+            enc = tokenizer(
+                prompts,
+                padding=True,
+                truncation=True,
+                return_tensors="pt"
+            )
+            return enc["input_ids"].to(device), enc["attention_mask"].to(device)
+        return tokenizer_fn
+
+    else:
+        raise ValueError(f"Unknown text encoder: {TEXT_ENCODER_NAME}")
+
+# ------------------------------------------------------
 # TEXT FEATURES
 # ------------------------------------------------------
 prompts = [f"a photo of a {name}" for name in FLOWER_CLASSES]
 
-def tokenize(prompts):
-    if MODEL_TYPE.startswith("openai_clip"):
-        return clip.tokenize(prompts).to(device), None
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    enc = tokenizer(prompts, padding=True, truncation=True, return_tensors="pt")
-    return enc["input_ids"].to(device), enc["attention_mask"].to(device)
-
-input_ids, attention_mask = tokenize(prompts)
+tokenizer_fn = get_tokenizer()
+input_ids, attention_mask = tokenizer_fn(prompts, device)
 
 with torch.no_grad():
     if attention_mask is None:
         text_features = model.encode_text(input_ids)
     else:
         text_features = model.encode_text(input_ids, attention_mask)
+
     text_features /= text_features.norm(dim=-1, keepdim=True)
 
 # ------------------------------------------------------
@@ -162,45 +222,44 @@ for T in TEMPERATURES:
         temp_probs.append(probs)
 
         summary_rows.extend([
-            {"model": MODEL_NAME, "temperature": T, "split": split_name,
+            {"model": MODEL_ID, "temperature": T, "split": split_name,
              "metric": "entropy", "mean": ent},
-            {"model": MODEL_NAME, "temperature": T, "split": split_name,
+            {"model": MODEL_ID, "temperature": T, "split": split_name,
              "metric": "confidence", "mean": conf},
-            {"model": MODEL_NAME, "temperature": T, "split": split_name,
+            {"model": MODEL_ID, "temperature": T, "split": split_name,
              "metric": "logit_std", "mean": lstd},
         ])
 
     entropy_vs_T.append(ent)
 
-    # Dataset-level probability histogram
     all_probs = torch.cat(temp_probs).numpy()
     plt.figure(figsize=(7, 5))
     plt.hist(all_probs, bins=50, density=True)
     plt.xlabel("Predicted probability")
     plt.ylabel("Density")
-    plt.title(f"Probability Distribution | T={T}")
+    plt.title(f"{MODEL_ID} | Probability Distribution (T={T})")
     plt.tight_layout()
-    plt.savefig(os.path.join(TEMP_RESULTS_DIR, f"probability_histogram_T{T}.png"))
+    plt.savefig(os.path.join(RESULTS_DIR, f"probability_histogram_T{T}.png"))
     plt.close()
 
 # ------------------------------------------------------
-# ENTROPY VS TEMPERATURE PLOT
+# ENTROPY VS TEMPERATURE
 # ------------------------------------------------------
 plt.figure(figsize=(7, 5))
 plt.plot(TEMPERATURES, entropy_vs_T, marker="o")
 plt.xlabel("Temperature τ")
 plt.ylabel("Mean entropy")
-plt.title(f"Entropy vs Temperature ({MODEL_NAME})")
+plt.title(f"Entropy vs Temperature ({MODEL_ID})")
 plt.grid(True)
 plt.tight_layout()
-plt.savefig(os.path.join(TEMP_RESULTS_DIR, "entropy_vs_temperature.png"))
+plt.savefig(os.path.join(RESULTS_DIR, "entropy_vs_temperature.png"))
 plt.close()
 
 # ------------------------------------------------------
 # SAVE CSV
 # ------------------------------------------------------
 df = pd.DataFrame(summary_rows)
-csv_path = os.path.join(TEMP_RESULTS_DIR, "summary_metrics.csv")
+csv_path = os.path.join(RESULTS_DIR, "summary_metrics.csv")
 df.round(4).to_csv(csv_path, index=False)
 
-print(f"\nAll temperature results saved to {TEMP_RESULTS_DIR}")
+print(f"\nAll temperature results saved to {RESULTS_DIR}")

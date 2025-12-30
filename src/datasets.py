@@ -33,8 +33,4 @@ class FlowersCLIPDataset(Dataset):
             max_length=32
         )
 
-        return (
-            image,
-            tokens["input_ids"].squeeze(0),
-            tokens["attention_mask"].squeeze(0)
-        )
+        return image, tokens["input_ids"].squeeze(0), tokens["attention_mask"].squeeze(0)
