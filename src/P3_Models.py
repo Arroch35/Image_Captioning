@@ -2,39 +2,67 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-
+from transformers import (
+    BertModel,
+    GPT2Model
+)
 
 class EncoderWithProjection(nn.Module):
-    def __init__(self, encoder, out_dim):
+    def __init__(self, encoder, out_dim, encoder_type="bert"):
         super().__init__()
         self.encoder = encoder
+        self.encoder_type = encoder_type
         self.in_dim = encoder.output_dim
         self.proj = nn.Linear(self.in_dim, out_dim)
 
-    def forward(self, *args, **kwargs):
-        features = self.encoder(*args, **kwargs)
-        return self.proj(features)
+    def forward(self, input_ids=None, attention_mask=None, images=None):
+        if self.encoder_type == "bert":
+            outputs = self.encoder(input_ids, attention_mask)
+        elif self.encoder_type == "gpt":
+            outputs = self.encoder(input_ids, attention_mask)
+        else:  # images
+            outputs = self.encoder(images)
+        return self.proj(outputs)
 
 class ResNetWrapper(nn.Module):
     def __init__(self, resnet):
         super().__init__()
-        self.backbone = resnet
+        self.backbone = models.resnet50(pretrained=True)
         self.output_dim = 2048
 
     def forward(self, x):
         return self.backbone(x)
     
-class BertWrapper(nn.Module):
-    def __init__(self, bert):
+class SwinTinyWrapper(nn.Module):
+    def __init__(self, swin):
         super().__init__()
-        self.bert = bert
-        self.output_dim = bert.config.hidden_size  # 768
+        # Load pretrained Swin Tiny
+        self.backbone = models.swin_t(weights="IMAGENET1K_V1")
+        self.backbone.head = nn.Identity()  # remove classifier
+        self.output_dim = 768  # Swin Tiny final embedding dimension
+
+    def forward(self, x):
+        return self.backbone(x)
+    
+class BERTWrapper(nn.Module):
+    def __init__(self, name="bert-base-uncased"):
+        super().__init__()
+        self.model = BertModel.from_pretrained(name)
+        self.output_dim = self.model.config.hidden_size
+
+    def forward(self, input_ids, attention_mask):
+        return self.model(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state[:, 0]
+
+    
+class GPTWrapper(nn.Module):
+    def __init__(self, name="gpt2"):
+        super().__init__()
+        self.model = GPT2Model.from_pretrained(name)
+        self.output_dim = self.model.config.hidden_size
 
     def forward(self, input_ids, attention_mask=None):
-        return self.bert(
-            input_ids=input_ids,
-            attention_mask=attention_mask
-        ).last_hidden_state[:, 0]  # CLS
+        last_hidden = self.model(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+        return last_hidden.mean(dim=1)  # mean pooling
 
 class ModularCLIP(nn.Module):
     def __init__(
@@ -53,7 +81,7 @@ class ModularCLIP(nn.Module):
         )
 
     def encode_image(self, images):
-        feats = self.image_encoder(images)
+        feats = self.image_encoder(images=images)
         return feats / feats.norm(dim=-1, keepdim=True)
 
     def encode_text(self, input_ids, attention_mask):

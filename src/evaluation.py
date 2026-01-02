@@ -14,32 +14,50 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 
-import clip  # OpenAI CLIP
+import clip
+from transformers import BertTokenizer, GPT2Tokenizer
+
 from flowers_names import FLOWER_CLASSES
-from utils import build_clip_preprocess, build_custom_resnet50_bert_clip
-from transformers import BertModel, BertTokenizer
-
+from utils import *
+from P3_Models import *
 
 # ------------------------------------------------------
-# CONFIG — CHANGE MODEL HERE
+# CONFIG (CHANGE ONLY THIS)
 # ------------------------------------------------------
-MODEL_NAME = "resnet50_bert" #"resnet50_bert" #"ViT-B-32_zero_shot"          # used for filenames
-MODEL_TYPE = "custom_clip"                 # "openai_clip" | "openai_clip_finetuned" | "custom_clip"
-CLIP_BACKBONE = "ViT-B/32"                 # only for openai_clip and openai_clip_finetuned
-CHECKPOINT_PATH = "../models/custom_clip_resnet50_bert.pth"   # path/to/model.pth for custom
+MODEL_TYPE = "custom_clip"
+# "openai_clip" | "openai_clip_finetuned" | "custom_clip"
 
-PART = "/part3" # Change depending on the part of the project
+# --- OpenAI CLIP ---
+CLIP_BACKBONE = "ViT-B/32"
+
+# --- Custom CLIP ---
+IMAGE_ENCODER_NAME = "resnet50"          # resnet50 | swin_tiny
+TEXT_ENCODER_NAME  = "bert-base-uncased" # bert-base-uncased | gpt2
+CHECKPOINT_PATH = "../models/custom_clip_resnet50_bert-base-uncased.pth"
+
+# MODEL ID (used for result folder naming)
+if MODEL_TYPE == "custom_clip":
+    MODEL_ID = f"{IMAGE_ENCODER_NAME}_{TEXT_ENCODER_NAME}"
+else:
+    MODEL_ID = CLIP_BACKBONE.replace("/", "_")
+
+PART = "/part3"
 DATA_DIR = "../data"
 IMAGE_DIR = os.path.join(DATA_DIR, "jpg")
-RESULTS_DIR = "../data/results" + PART
+BASE_RESULTS_DIR = "../data/results" + PART
+RESULTS_DIR = os.path.join(BASE_RESULTS_DIR, MODEL_ID)
+
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
 BATCH_SIZE = 32
 N_SPLITS = 10
+EMBED_DIM = 512
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Device: {device}")
-print(f"Model: {MODEL_NAME}")
+print(f"Model type: {MODEL_TYPE}")
 
 # ------------------------------------------------------
 # LOAD MODEL
@@ -48,43 +66,36 @@ def load_model():
     if MODEL_TYPE == "openai_clip":
         model, preprocess = clip.load(CLIP_BACKBONE, device=device)
         model.eval()
-        return model, preprocess
-    
+        return model, preprocess, "openai"
+
     elif MODEL_TYPE == "openai_clip_finetuned":
-        # Fine-tuned OpenAI CLIP
         model, preprocess = clip.load(CLIP_BACKBONE, device=device)
-
         checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
-
-        # Allow both raw state_dict or wrapped dict
-        if "state_dict" in checkpoint:
-            model.load_state_dict(checkpoint["state_dict"])
-        else:
-            model.load_state_dict(checkpoint)
-
+        model.load_state_dict(checkpoint)
         model.to(device).eval()
-        return model, preprocess
+        return model, preprocess, "openai"
 
     elif MODEL_TYPE == "custom_clip":
-        from P3_Models import ModularCLIP  # your model file
+        image_encoder = build_image_encoder(IMAGE_ENCODER_NAME, EMBED_DIM)
+        text_encoder  = build_text_encoder(TEXT_ENCODER_NAME, EMBED_DIM)
+
+        model = ModularCLIP(
+            image_encoder=image_encoder,
+            text_encoder=text_encoder,
+            embed_dim=EMBED_DIM
+        )
+
         checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
-        model = build_custom_resnet50_bert_clip(device)
-        
         model.load_state_dict(checkpoint)
         model.to(device).eval()
 
         preprocess = build_clip_preprocess(image_size=224)
-        return model, preprocess
+        return model, preprocess, "custom"
 
     else:
-        raise ValueError("Unknown MODEL_TYPE")
+        raise ValueError(f"Unknown MODEL_TYPE: {MODEL_TYPE}")
 
-model, preprocess = load_model()
-
-# ------------------------------------------------------
-# FLOWER CLASS NAMES
-# ------------------------------------------------------
-NUM_CLASSES = len(FLOWER_CLASSES)
+model, preprocess, mode = load_model()
 
 # ------------------------------------------------------
 # LOAD LABELS & SPLITS
@@ -94,69 +105,54 @@ setid = sio.loadmat(os.path.join(DATA_DIR, "setid.mat"))
 
 splits = {
     "train": setid["trnid"].squeeze(),
-    "val": setid["valid"].squeeze(),
-    "test": setid["tstid"].squeeze(),
+    "val":   setid["valid"].squeeze(),
+    "test":  setid["tstid"].squeeze(),
 }
+
+NUM_CLASSES = len(FLOWER_CLASSES)
 
 # ------------------------------------------------------
 # TEXT FEATURES (ONCE)
 # ------------------------------------------------------
+def get_tokenizer(name):
+    if "bert" in name:
+        return BertTokenizer.from_pretrained(name)
+    elif "gpt" in name:
+        tok = GPT2Tokenizer.from_pretrained(name)
+        tok.pad_token = tok.eos_token
+        return tok
+    else:
+        raise ValueError(f"Unknown text encoder: {name}")
+
 prompts = [f"a photo of a {name}" for name in FLOWER_CLASSES]
 
-def get_tokenizer(model_name_or_type):
-    if model_name_or_type.lower().startswith("openai_clip"):
-        def tokenizer(prompts, device):
-            tokens = clip.tokenize(prompts).to(device)
-            return tokens, None
-        return tokenizer
+with torch.no_grad():
+    if mode == "openai":
+        tokens = clip.tokenize(prompts).to(device)
+        text_features = model.encode_text(tokens)
 
-    elif model_name_or_type.lower().endswith("bert"):
-        bert_tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-        def tokenizer(prompts, device):
-            encoded = bert_tokenizer(
-                prompts,
-                padding=True,
-                truncation=True,
-                return_tensors="pt"
-            )
-            return (
-                encoded["input_ids"].to(device),
-                encoded["attention_mask"].to(device)
-            )
-        return tokenizer
+    else:  # custom clip
+        tokenizer = get_tokenizer(TEXT_ENCODER_NAME)
+        encoded = tokenizer(
+            prompts,
+            padding=True,
+            truncation=True,
+            return_tensors="pt"
+        )
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device)
+        text_features = model.encode_text(input_ids, attention_mask)
 
-    else:
-        raise ValueError(f"Unknown model type: {model_name_or_type}")
-
-# 1 Get tokenizer function
-tokenizer_fn = get_tokenizer(
-    MODEL_NAME if MODEL_TYPE == "custom_clip" else MODEL_TYPE
-)
-
-# 2 Run tokenizer
-text_tokens, attention_mask = tokenizer_fn(prompts, device)
-
-# 3 Encode text
-if MODEL_TYPE == "custom_clip" and MODEL_NAME.lower().endswith("bert"):
-    with torch.no_grad():
-        text_features = model.encode_text(text_tokens, attention_mask)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-else:
-    with torch.no_grad():
-        text_features = model.encode_text(text_tokens)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-
-
+text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 logit_scale = model.logit_scale.exp()
 
 # ------------------------------------------------------
-# EVALUATION
+# EVALUATION FUNCTION
 # ------------------------------------------------------
 def evaluate_ids(image_ids):
     top1 = top3 = top5 = 0
     similarity_sum = 0.0
-    all_logits = []
-    all_targets = []
+    all_logits, all_targets = [], []
 
     for i in tqdm(range(0, len(image_ids), BATCH_SIZE), leave=False):
         batch_ids = image_ids[i:i + BATCH_SIZE]
@@ -168,7 +164,7 @@ def evaluate_ids(image_ids):
             targets.append(labels[img_id - 1])
 
         images = torch.stack(images).to(device)
-        targets = torch.tensor(targets, dtype=torch.long, device=device)
+        targets = torch.tensor(targets, device=device)
 
         with torch.no_grad():
             image_features = model.encode_image(images)
@@ -177,8 +173,8 @@ def evaluate_ids(image_ids):
             logits = logit_scale * image_features @ text_features.T
             _, topk = logits.topk(5, dim=-1)
 
-            gt_text_features = text_features.index_select(0, targets)
-            similarity_sum += (image_features * gt_text_features).sum(dim=-1).sum().item()
+            gt_text = text_features.index_select(0, targets)
+            similarity_sum += (image_features * gt_text).sum(dim=-1).sum().item()
 
         top1 += (topk[:, 0] == targets).sum().item()
         top3 += sum(t in topk[i, :3] for i, t in enumerate(targets))
@@ -235,16 +231,12 @@ for split_name, split_ids in splits.items():
 # ------------------------------------------------------
 for split_name, result in all_results.items():
     m = result["metrics"]
-
     plt.figure(figsize=(10, 6))
     sns.boxplot(data=[m["top1"], m["top3"], m["top5"], m["mean_similarity"]])
     plt.xticks([0, 1, 2, 3], ["Top-1", "Top-3", "Top-5", "Mean Similarity"])
-    plt.title(f"{MODEL_NAME} – {split_name} split")
+    plt.title(f"{MODEL_TYPE} – {split_name}")
     plt.tight_layout()
-
-    plt.savefig(os.path.join(
-        RESULTS_DIR, f"{MODEL_NAME}_{split_name}_metrics_boxplot.png"
-    ))
+    plt.savefig(os.path.join(RESULTS_DIR, f"{MODEL_TYPE}_{split_name}_boxplot.png"))
     plt.close()
 
 # ------------------------------------------------------
@@ -266,24 +258,20 @@ for split_name, result in all_results.items():
     plt.figure(figsize=(7, 6))
     plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
     plt.plot([0, 1], [0, 1], "--", color="gray")
-    plt.title(f"ROC – {MODEL_NAME} – {split_name}")
+    plt.title(f"ROC – {MODEL_TYPE} – {split_name}")
     plt.legend()
     plt.tight_layout()
-
-    plt.savefig(os.path.join(
-        RESULTS_DIR, f"{MODEL_NAME}_{split_name}_roc_curve.png"
-    ))
+    plt.savefig(os.path.join(RESULTS_DIR, f"{MODEL_TYPE}_{split_name}_roc.png"))
     plt.close()
 
 # ------------------------------------------------------
 # SUMMARY CSV
 # ------------------------------------------------------
 rows = []
-
 for split_name, result in all_results.items():
     for metric, values in result["metrics"].items():
         rows.append({
-            "model": MODEL_NAME,
+            "model": MODEL_TYPE,
             "split": split_name,
             "metric": metric,
             "mean": np.mean(values),
@@ -291,7 +279,7 @@ for split_name, result in all_results.items():
         })
 
 summary_df = pd.DataFrame(rows)
-csv_path = os.path.join(RESULTS_DIR, f"{MODEL_NAME}_summary_metrics.csv")
+csv_path = os.path.join(RESULTS_DIR, f"{MODEL_TYPE}_summary_metrics.csv")
 summary_df.round(4).to_csv(csv_path, index=False)
 
 print(f"\nResults saved to {csv_path}")

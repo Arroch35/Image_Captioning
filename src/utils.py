@@ -47,7 +47,7 @@ def build_custom_resnet50_bert_clip(device, embed_dim=512, init_temperature=0.07
     # ------------------------------------------------------
     bert = BertModel.from_pretrained("bert-base-uncased")
     text_encoder = EncoderWithProjection(
-        encoder=BertWrapper(bert),
+        encoder=BERTWrapper(bert),
         out_dim=embed_dim
     )
 
@@ -63,3 +63,19 @@ def build_custom_resnet50_bert_clip(device, embed_dim=512, init_temperature=0.07
 
     return model.to(device)
 
+
+def build_image_encoder(name, embed_dim):
+    if "resnet" in name:
+        return EncoderWithProjection(ResNetWrapper(name), embed_dim, encoder_type="image")
+    elif "swin_tiny" in name or "swin" in name:
+        return EncoderWithProjection(SwinTinyWrapper(name), embed_dim, encoder_type="image")
+    else:
+        raise ValueError(f"Unknown image encoder: {name}")
+
+def build_text_encoder(name, embed_dim):
+    if "bert" in name:
+        return EncoderWithProjection(BERTWrapper(name), embed_dim, encoder_type="bert")
+    elif "gpt" in name:
+        return EncoderWithProjection(GPTWrapper(name), embed_dim, encoder_type="gpt")
+    else:
+        raise ValueError(f"Unknown text encoder: {name}")
