@@ -72,15 +72,21 @@ class ModularCLIP(nn.Module):
         image_encoder,
         text_encoder,
         embed_dim=512,
-        init_temperature=0.07
+        init_temperature=0.07,
+        learned_temperature=None
     ):
         super().__init__()
         self.image_encoder = image_encoder
         self.text_encoder = text_encoder
 
-        self.logit_scale = nn.Parameter(
-            torch.ones([]) * math.log(1 / init_temperature)
-        )
+        if learned_temperature is None:
+            self.logit_scale = nn.Parameter(
+                torch.ones([]) * math.log(1 / init_temperature)
+            )
+        else:
+            self.logit_scale = nn.Parameter(
+                torch.ones([]) * math.log(1 / learned_temperature)
+            )
 
     def encode_image(self, images):
         feats = self.image_encoder(images=images)

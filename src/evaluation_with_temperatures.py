@@ -20,20 +20,20 @@ from P3_Models import *
 # ------------------------------------------------------
 # CONFIG — CHANGE MODEL HERE
 # ------------------------------------------------------
-MODEL_TYPE = "custom_clip"
+MODEL_TYPE = "openai_clip"
 # openai_clip | openai_clip_finetuned | custom_clip
 
 CLIP_BACKBONE = "ViT-B/32"
 
 IMAGE_ENCODER_NAME = "resnet50"  # resnet50 | swin_tiny
 TEXT_ENCODER_NAME = "gpt2" # bert-base-uncased | gpt2
-CHECKPOINT_PATH = "../models/custom_clip_resnet50_gpt2.pth"
+CHECKPOINT_PATH = f"../models/cosine_lr/custom_clip_{IMAGE_ENCODER_NAME}_{TEXT_ENCODER_NAME}.pth"
 
-PART = "/part3" # Change for each part of the project
+PART = "/part1/cosine_lr" # Change for each part of the project
 DATA_DIR = "../data"
 IMAGE_DIR = os.path.join(DATA_DIR, "jpg")
 
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 TEMPERATURES = [0.005, 0.01, 0.02, 0.05, 0.1]
 EMBED_DIM = 512
 
@@ -94,10 +94,13 @@ model, preprocess = load_model()
 labels = sio.loadmat(os.path.join(DATA_DIR, "imagelabels.mat"))["labels"].squeeze() - 1
 setid = sio.loadmat(os.path.join(DATA_DIR, "setid.mat"))
 
+trnid = setid["trnid"].squeeze()
+valid = setid["valid"].squeeze()
+tstid = setid["tstid"].squeeze()
+
 splits = {
-    "train": setid["trnid"].squeeze(),
-    "val": setid["valid"].squeeze(),
-    "test": setid["tstid"].squeeze(),
+    "train": np.concatenate([valid, tstid]),  # <-- evaluate here
+    "reversed_test": trnid,   # <-- evaluate here only
 }
 
 NUM_CLASSES = len(FLOWER_CLASSES)
