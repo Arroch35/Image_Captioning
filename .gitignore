@@ -209,5 +209,14 @@ __marimo__/
 # Data
 data/
 
+# Models
+models/
+models/*.pth
+models/*.pt
+
 # Notebooks
 *.ipynb
+
+# .out .err
+*.err
+*.out
