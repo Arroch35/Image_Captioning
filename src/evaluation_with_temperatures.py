@@ -20,16 +20,16 @@ from P3_Models import *
 # ------------------------------------------------------
 # CONFIG — CHANGE MODEL HERE
 # ------------------------------------------------------
-MODEL_TYPE = "openai_clip"
+MODEL_TYPE = "custom_clip"
 # openai_clip | openai_clip_finetuned | custom_clip
 
 CLIP_BACKBONE = "ViT-B/32"
 
-IMAGE_ENCODER_NAME = "resnet50"  # resnet50 | swin_tiny
-TEXT_ENCODER_NAME = "gpt2" # bert-base-uncased | gpt2
+IMAGE_ENCODER_NAME = "swin_tiny"  # resnet50 | swin_tiny
+TEXT_ENCODER_NAME = "bert-base-uncased" # bert-base-uncased | gpt2
 CHECKPOINT_PATH = f"../models/cosine_lr/custom_clip_{IMAGE_ENCODER_NAME}_{TEXT_ENCODER_NAME}.pth"
 
-PART = "/part1/cosine_lr" # Change for each part of the project
+PART = "/part3/cosine_lr" # Change for each part of the project
 DATA_DIR = "../data"
 IMAGE_DIR = os.path.join(DATA_DIR, "jpg")
 

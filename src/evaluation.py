@@ -25,7 +25,7 @@ from P3_Models import *
 # ------------------------------------------------------
 # CONFIG (CHANGE ONLY THIS)
 # ------------------------------------------------------
-MODEL_TYPE = "openai_clip"
+MODEL_TYPE = "custom_clip"
 # "openai_clip" | "openai_clip_finetuned" | "custom_clip"
 
 # --- OpenAI CLIP ---
@@ -33,7 +33,7 @@ CLIP_BACKBONE = "ViT-B/32"
 
 # --- Custom CLIP ---
 IMAGE_ENCODER_NAME = "swin_tiny" # resnet50 | swin_tiny
-TEXT_ENCODER_NAME  = "gpt2" # bert-base-uncased | gpt2
+TEXT_ENCODER_NAME  = "bert-base-uncased" # bert-base-uncased | gpt2
 CHECKPOINT_PATH = f"../models/cosine_lr/custom_clip_{IMAGE_ENCODER_NAME}_{TEXT_ENCODER_NAME}.pth"
 
 # MODEL ID (used for result folder naming)
@@ -42,7 +42,7 @@ if MODEL_TYPE == "custom_clip":
 else:
     MODEL_ID = CLIP_BACKBONE.replace("/", "_")
 
-PART = "/part1" # Change for each part of the project
+PART = "/part3" # Change for each part of the project
 DATA_DIR = "../data"
 IMAGE_DIR = os.path.join(DATA_DIR, "jpg")
 BASE_RESULTS_DIR = "../data/results" + PART
@@ -256,7 +256,7 @@ for split_name, split_ids in splits.items():
     print(f"Confusion matrix for {split_name} saved to {cm_csv_path}")
     
     plt.figure(figsize=(12, 10))
-    sns.heatmap(df_cm, annot=False, fmt="d", cmap="Blues")  # annot=True if you want numbers
+    sns.heatmap(df_cm, annot=False, fmt="d", cmap="Blues")  
     plt.title(f"{MODEL_TYPE} – {split_name} Confusion Matrix")
     plt.ylabel("True Class")
     plt.xlabel("Predicted Class")
@@ -335,3 +335,11 @@ csv_path = os.path.join(RESULTS_DIR, f"{MODEL_TYPE}_summary_metrics.csv")
 summary_df.round(4).to_csv(csv_path, index=False)
 
 print(f"\nResults saved to {csv_path}")
+
+# ------------------------------------------------------
+# SAVE FOLD-WISE TOP-1 FOR STATISTICAL TESTS
+# ------------------------------------------------------
+np.save(
+    os.path.join(RESULTS_DIR, f"{MODEL_TYPE}_top1_folds.npy"),
+    np.array(all_results["reversed_test"]["metrics"]["top1"])
+)
