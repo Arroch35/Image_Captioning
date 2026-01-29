@@ -47,7 +47,7 @@ def build_custom_resnet50_bert_clip(device, embed_dim=512, init_temperature=0.07
     # ------------------------------------------------------
     bert = BertModel.from_pretrained("bert-base-uncased")
     text_encoder = EncoderWithProjection(
-        encoder=BertWrapper(bert),
+        encoder=BERTWrapper(bert),
         out_dim=embed_dim
     )
 

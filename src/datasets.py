@@ -30,7 +30,7 @@ class FlowersCLIPDataset(Dataset):
             return_tensors="pt",
             padding="max_length",
             truncation=True,
-            max_length=32
+            max_length=77 #32
         )
 
         return image, tokens["input_ids"].squeeze(0), tokens["attention_mask"].squeeze(0)
