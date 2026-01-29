@@ -8,12 +8,14 @@ from PIL import Image
 import scipy.io as sio
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-import seaborn as sns
 import pandas as pd
 
 import clip
-from transformers import BertTokenizer
+from transformers import BertTokenizer, GPT2Tokenizer
+
 from flowers_names import FLOWER_CLASSES
+from utils import *
+from P3_Models import *
 from utils import *
 from P3_Models import *
 
@@ -91,9 +93,8 @@ model, preprocess = load_model()
 labels = sio.loadmat(os.path.join(DATA_DIR, "imagelabels.mat"))["labels"].squeeze() - 1
 setid = sio.loadmat(os.path.join(DATA_DIR, "setid.mat"))
 splits = {
-    "train": setid["trnid"].squeeze(),
-    "val": setid["valid"].squeeze(),
-    "test": setid["tstid"].squeeze(),
+    "train": np.concatenate([valid, tstid]),  # <-- evaluate here
+    "reversed_test": trnid,   # <-- evaluate here only
 }
 NUM_CLASSES = len(FLOWER_CLASSES)
 
@@ -123,7 +124,7 @@ with torch.no_grad():
     text_features /= text_features.norm(dim=-1, keepdim=True)
 
 # ------------------------------------------------------
-# EVALUATION FUNCTION
+# EVALUATION
 # ------------------------------------------------------
 def evaluate_ids(image_ids, temperature, collect_probs=False):
     entropies, confidences, logit_stds = [], [], []
@@ -140,6 +141,8 @@ def evaluate_ids(image_ids, temperature, collect_probs=False):
         images = torch.stack(images).to(DEVICE)
 
         with torch.no_grad():
+            img_feat = model.encode_image(images)
+            img_feat /= img_feat.norm(dim=-1, keepdim=True)
             img_feat = model.encode_image(images)
             img_feat /= img_feat.norm(dim=-1, keepdim=True)
 
@@ -214,9 +217,8 @@ plt.close()
 # SAVE CSV
 # ------------------------------------------------------
 df = pd.DataFrame(summary_rows)
-csv_path = os.path.join(TEMP_RESULTS_DIR, "summary_metrics.csv")
-df.round(4).to_csv(csv_path, index=False)
+df.to_csv(os.path.join(RESULTS_DIR, "summary_metrics.csv"), index=False)
 
-print(f"\nAll temperature results saved to {TEMP_RESULTS_DIR}")
+print(f"\nAll temperature results saved to {RESULTS_DIR}")
 
 #TODO: Hacer esto bien y ejecutarlo para todos los models

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from torchvision import models, transforms
 from transformers import (
     BertModel,
     GPT2Model
@@ -28,6 +29,7 @@ class ResNetWrapper(nn.Module):
     def __init__(self, resnet):
         super().__init__()
         self.backbone = models.resnet50(pretrained=True)
+        self.backbone.fc = nn.Identity()
         self.output_dim = 2048
 
     def forward(self, x):
@@ -70,15 +72,21 @@ class ModularCLIP(nn.Module):
         image_encoder,
         text_encoder,
         embed_dim=512,
-        init_temperature=0.07
+        init_temperature=0.07,
+        learned_temperature=None
     ):
         super().__init__()
         self.image_encoder = image_encoder
         self.text_encoder = text_encoder
 
-        self.logit_scale = nn.Parameter(
-            torch.ones([]) * math.log(1 / init_temperature)
-        )
+        if learned_temperature is None:
+            self.logit_scale = nn.Parameter(
+                torch.ones([]) * math.log(1 / init_temperature)
+            )
+        else:
+            self.logit_scale = nn.Parameter(
+                torch.ones([]) * math.log(1 / learned_temperature)
+            )
 
     def encode_image(self, images):
         feats = self.image_encoder(images=images)

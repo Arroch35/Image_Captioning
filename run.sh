@@ -12,4 +12,4 @@
 sleep 3
 
 # Change to your user home folder in the cluster.
-python3 -u evaluation_with_temperatures.py #evaluation.py #custom_clip_training.py #evaluation_with_temperatures.py
+python3 -u evaluation_with_temperatures.py #fine_tuning.py #custom_clip_training_copy.py #evaluation_with_temperatures.py #evaluation.py #custom_clip_training.py #evaluation_with_temperatures.py

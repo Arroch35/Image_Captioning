@@ -13,6 +13,7 @@ from sklearn.metrics import roc_curve, auc
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
+from sklearn.metrics import confusion_matrix
 
 import clip
 from transformers import BertTokenizer, GPT2Tokenizer
@@ -31,9 +32,9 @@ MODEL_TYPE = "custom_clip"
 CLIP_BACKBONE = "ViT-B/32"
 
 # --- Custom CLIP ---
-IMAGE_ENCODER_NAME = "resnet50"          # resnet50 | swin_tiny
+IMAGE_ENCODER_NAME = "swin_tiny" # resnet50 | swin_tiny
 TEXT_ENCODER_NAME  = "bert-base-uncased" # bert-base-uncased | gpt2
-CHECKPOINT_PATH = "../models/custom_clip_resnet50_bert-base-uncased.pth"
+CHECKPOINT_PATH = f"../models/cosine_lr/custom_clip_{IMAGE_ENCODER_NAME}_{TEXT_ENCODER_NAME}.pth"
 
 # MODEL ID (used for result folder naming)
 if MODEL_TYPE == "custom_clip":
@@ -41,7 +42,7 @@ if MODEL_TYPE == "custom_clip":
 else:
     MODEL_ID = CLIP_BACKBONE.replace("/", "_")
 
-PART = "/part3"
+PART = "/part3" # Change for each part of the project
 DATA_DIR = "../data"
 IMAGE_DIR = os.path.join(DATA_DIR, "jpg")
 BASE_RESULTS_DIR = "../data/results" + PART
@@ -49,9 +50,17 @@ RESULTS_DIR = os.path.join(BASE_RESULTS_DIR, MODEL_ID)
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 N_SPLITS = 10
 EMBED_DIM = 512
+TEMPERATURES = {
+    ("resnet50", "bert-base-uncased"): 0.0688,
+    ("swin_tiny", "bert-base-uncased"): 0.0675,
+    ("resnet50", "gpt2"): 0.0678,
+    ("swin_tiny", "gpt2"): 0.0674,
+}
+
+LEARNED_TEMPERATURE = TEMPERATURES[(IMAGE_ENCODER_NAME, TEXT_ENCODER_NAME)]
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -82,7 +91,8 @@ def load_model():
         model = ModularCLIP(
             image_encoder=image_encoder,
             text_encoder=text_encoder,
-            embed_dim=EMBED_DIM
+            embed_dim=EMBED_DIM,
+            learned_temperature=LEARNED_TEMPERATURE
         )
 
         checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
@@ -103,10 +113,13 @@ model, preprocess, mode = load_model()
 labels = sio.loadmat(os.path.join(DATA_DIR, "imagelabels.mat"))["labels"].squeeze() - 1
 setid = sio.loadmat(os.path.join(DATA_DIR, "setid.mat"))
 
+trnid = setid["trnid"].squeeze()
+valid = setid["valid"].squeeze()
+tstid = setid["tstid"].squeeze()
+
 splits = {
-    "train": setid["trnid"].squeeze(),
-    "val":   setid["valid"].squeeze(),
-    "test":  setid["tstid"].squeeze(),
+    "train": np.concatenate([valid, tstid]),  # <-- evaluate here
+    "reversed_test": trnid,   # <-- evaluate here only
 }
 
 NUM_CLASSES = len(FLOWER_CLASSES)
@@ -151,8 +164,10 @@ logit_scale = model.logit_scale.exp()
 # ------------------------------------------------------
 def evaluate_ids(image_ids):
     top1 = top3 = top5 = 0
-    similarity_sum = 0.0
+    clip_similarity_sum = 0.0      # CLIP-style similarity (with learned temperature)
+    cosine_similarity_sum = 0.0    # pure cosine similarity (0..1)
     all_logits, all_targets = [], []
+    top1_preds= []
 
     for i in tqdm(range(0, len(image_ids), BATCH_SIZE), leave=False):
         batch_ids = image_ids[i:i + BATCH_SIZE]
@@ -164,7 +179,7 @@ def evaluate_ids(image_ids):
             targets.append(labels[img_id - 1])
 
         images = torch.stack(images).to(device)
-        targets = torch.tensor(targets, device=device)
+        targets = torch.tensor(targets, dtype=torch.long, device=device)
 
         with torch.no_grad():
             image_features = model.encode_image(images)
@@ -174,12 +189,14 @@ def evaluate_ids(image_ids):
             _, topk = logits.topk(5, dim=-1)
 
             gt_text = text_features.index_select(0, targets)
-            similarity_sum += (image_features * gt_text).sum(dim=-1).sum().item()
+            cosine_similarity_sum += ((image_features * gt_text).sum(dim=-1)).sum().item()
+            clip_similarity_sum += (logit_scale * (image_features * gt_text).sum(dim=-1)).sum().item()
 
         top1 += (topk[:, 0] == targets).sum().item()
         top3 += sum(t in topk[i, :3] for i, t in enumerate(targets))
         top5 += sum(t in topk[i] for i, t in enumerate(targets))
 
+        top1_preds.extend(topk[:, 0].cpu().numpy())
         all_logits.append(logits.cpu())
         all_targets.append(targets.cpu())
 
@@ -188,9 +205,11 @@ def evaluate_ids(image_ids):
         top1 / total,
         top3 / total,
         top5 / total,
-        similarity_sum / total,
+        cosine_similarity_sum / total,
+        clip_similarity_sum / total,
         torch.cat(all_logits),
         torch.cat(all_targets),
+        np.array(top1_preds),
     )
 
 # ------------------------------------------------------
@@ -204,21 +223,46 @@ for split_name, split_ids in splits.items():
     kf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=42)
     split_labels = labels[split_ids - 1]
 
-    metrics = {"top1": [], "top3": [], "top5": [], "mean_similarity": []}
+    metrics = {"top1": [], "top3": [], "top5": [], "mean_cosine_similarity": [], "mean_clip_similarity": []}
     roc_logits, roc_targets = [], []
+    all_fold_targets = []
+    all_fold_preds = []     
 
     for fold, (_, test_idx) in enumerate(kf.split(split_ids, split_labels)):
         print(f"  Fold {fold + 1}/{N_SPLITS}")
         fold_ids = split_ids[test_idx]
 
-        t1, t3, t5, ms, logits, targets = evaluate_ids(fold_ids)
+        t1, t3, t5, coss, clis, logits, targets, preds = evaluate_ids(fold_ids)
         metrics["top1"].append(t1)
         metrics["top3"].append(t3)
         metrics["top5"].append(t5)
-        metrics["mean_similarity"].append(ms)
+        metrics["mean_cosine_similarity"].append(coss)
+        metrics["mean_clip_similarity"].append(clis)
 
         roc_logits.append(logits)
         roc_targets.append(targets)
+        
+        all_fold_targets.append(targets.numpy())
+        all_fold_preds.append(preds)
+
+    
+    all_targets_concat = np.concatenate(all_fold_targets)
+    all_preds_concat = np.concatenate(all_fold_preds)
+    
+    cm = confusion_matrix(all_targets_concat, all_preds_concat, labels=np.arange(NUM_CLASSES))
+    df_cm = pd.DataFrame(cm, index=FLOWER_CLASSES, columns=FLOWER_CLASSES)
+    cm_csv_path = os.path.join(RESULTS_DIR, f"{MODEL_TYPE}_{split_name}_confusion_matrix.csv")
+    df_cm.to_csv(cm_csv_path)
+    print(f"Confusion matrix for {split_name} saved to {cm_csv_path}")
+    
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(df_cm, annot=False, fmt="d", cmap="Blues")  
+    plt.title(f"{MODEL_TYPE} – {split_name} Confusion Matrix")
+    plt.ylabel("True Class")
+    plt.xlabel("Predicted Class")
+    plt.tight_layout()
+    plt.savefig(os.path.join(RESULTS_DIR, f"{MODEL_TYPE}_{split_name}_confusion_matrix.png"))
+    plt.close()
 
     all_results[split_name] = {
         "metrics": metrics,
@@ -232,11 +276,19 @@ for split_name, split_ids in splits.items():
 for split_name, result in all_results.items():
     m = result["metrics"]
     plt.figure(figsize=(10, 6))
-    sns.boxplot(data=[m["top1"], m["top3"], m["top5"], m["mean_similarity"]])
+    sns.boxplot(data=[m["top1"], m["top3"], m["top5"], m["mean_clip_similarity"]])
     plt.xticks([0, 1, 2, 3], ["Top-1", "Top-3", "Top-5", "Mean Similarity"])
     plt.title(f"{MODEL_TYPE} – {split_name}")
     plt.tight_layout()
-    plt.savefig(os.path.join(RESULTS_DIR, f"{MODEL_TYPE}_{split_name}_boxplot.png"))
+    plt.savefig(os.path.join(RESULTS_DIR, f"{MODEL_TYPE}_{split_name}_clip_similarity_boxplot.png"))
+    plt.close()
+    
+    plt.figure(figsize=(10, 6))
+    sns.boxplot(data=[m["top1"], m["top3"], m["top5"], m["mean_cosine_similarity"]])
+    plt.xticks([0, 1, 2, 3], ["Top-1", "Top-3", "Top-5", "Mean Similarity"])
+    plt.title(f"{MODEL_TYPE} – {split_name}")
+    plt.tight_layout()
+    plt.savefig(os.path.join(RESULTS_DIR, f"{MODEL_TYPE}_{split_name}_cosine_similarity_boxplot.png"))
     plt.close()
 
 # ------------------------------------------------------
@@ -283,3 +335,11 @@ csv_path = os.path.join(RESULTS_DIR, f"{MODEL_TYPE}_summary_metrics.csv")
 summary_df.round(4).to_csv(csv_path, index=False)
 
 print(f"\nResults saved to {csv_path}")
+
+# ------------------------------------------------------
+# SAVE FOLD-WISE TOP-1 FOR STATISTICAL TESTS
+# ------------------------------------------------------
+np.save(
+    os.path.join(RESULTS_DIR, f"{MODEL_TYPE}_top1_folds.npy"),
+    np.array(all_results["reversed_test"]["metrics"]["top1"])
+)
